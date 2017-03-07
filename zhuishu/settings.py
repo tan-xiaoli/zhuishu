@@ -121,7 +121,7 @@ else:
 MAIL_HOST = 'smtp.qq.com'    # SMTP主机
 MAIL_PORT = '465'    # SMTP端口
 MAIL_USER = 'tan-xiaoli@qq.com'    # SMTP用户
-MAIL_PASS = 'wbmcakxtillgbhdd'    # 用于SMTP认证
+MAIL_PASS = 'xxxxxxxxx'    # 用于SMTP认证(输入自己的SMTP密码)
 MAIL_SENDER = 'tan-xiaoli@qq.com'   # MAIL发送者，与SMTP用户一直
 MAIL_RECEIVERS = ['tan-xiaoli@qq.com']  # 邮件接收者
 
