@@ -35,7 +35,7 @@ class QQ_SMTP(object):
         self.mail_host = settings.get('MAIL_HOST', 'smtp.qq.com')
         self.mail_port = settings.get('MAIL_PORT', 465)
         self.mail_user = settings.get('MAIL_USER', 'tan-xiaoli@qq.com')
-        self.mail_pass = settings.get('MAIL_PASS', 'qgufuxhoxslubhjj')
+        self.mail_pass = settings.get('MAIL_PASS', 'XXXXXXXXXX')
         self.set_sender(settings.get('MAIL_SENDER', 'tan-xiaoli@qq.com'))
         self.set_receivers(settings.get('MAIL_RECEIVERS', '389210522@qq.com'))
 
