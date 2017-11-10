@@ -1,15 +1,23 @@
-# -*- coding: utf-8 -*-
+#!/usr/bin/python
+# coding=utf-8
+
+import sys
+reload(sys)
+sys.setdefaultencoding('UTF-8')
 
 import MySQLdb
 import MySQLdb.cursors
 import traceback
+import json
+import logging
 from twisted.enterprise import adbapi
-from zhuishu import settings
 from scrapy.exceptions import DropItem
-from zhuishu.lib.mail import QQ_SMTP
-from zhuishu.items import BookInfo, ChapterInfo
-from zhuishu.lib.tools import get_md5
+from zhuishu import settings
+
 from . import check_spider_pipeline
+from zhuishu.lib.lib_mail import QQ_SMTP
+from zhuishu.lib.lib_tools import get_md5
+from zhuishu.items import BookInfo, ChapterInfo
 
 
 class MySqlPipeLine(object):
@@ -18,6 +26,7 @@ class MySqlPipeLine(object):
     """
 
     def __init__(self, dbpool, book_tb):
+        self.logger = logging.getLogger(__name__)
         self.dbpool = dbpool
         self.book_tb = book_tb
 
@@ -46,36 +55,36 @@ class MySqlPipeLine(object):
     def process_item(self, item, spider):
         if isinstance(item, BookInfo):
             try:
-                query = self.dbpool.runInteraction(self._insert_books, item, spider)
-                query.addErrback(self._handle_error, item, spider)
+                query = self.dbpool.runInteraction(self._insert_books, item)
+                query.addErrback(self._handle_error, item)
             except Exception:
-                spider.logger.error(traceback.print_exc())
+                self.logger.error(traceback.print_exc())
         elif isinstance(item, ChapterInfo):
             try:
-                query = self.dbpool.runInteraction(self._insert_chapters, item, spider)
-                query.addErrback(self._handle_error, item, spider)
+                query = self.dbpool.runInteraction(self._insert_chapters, item)
+                query.addErrback(self._handle_error, item)
             except Exception:
-                spider.logger.error(traceback.print_exc())
+                self.logger.error(traceback.print_exc())
         return item
 
-    def _insert_books(self, tx, item, spider):
+    def _insert_books(self, tx, item):
         """
         添加books
         """
         # 判断数据库中是否存在数据
-        cmd = 'SELECT update_time, latest_chapter, latest_chapter_url FROM %s WHERE source="%s" AND book_name="%s"' % (
-            self.book_tb, item['source'], item['book_name'])
+        cmd = 'SELECT update_time, latest_chapter, latest_chapter_url FROM %s WHERE source="%s" AND book_name="%s"' %\
+            (self.book_tb, item['source'], item['book_name'])
         ret = tx.execute(cmd)
 
         if ret == 0:
             # 原来无数据时，添加新数据
-            spider.logger.info('Insert books[%s, %s, %s, %s, %s, %s, %s]' %
-                                (item['source'], item['book_name'], item['author'], item['update_time'],
-                                    item['latest_chapter'], item['latest_chapter_url'], item['chapter_db_name']))
+            self.logger.info('Insert books[%s, %s, %s, %s, %s, %s, %s]' %
+                             (item['book_name'], item['source'], item['author'], item['update_time'],
+                              item['latest_chapter'], item['latest_chapter_url'], item['chapter_db_name']))
 
-            cmd = '''INSERT INTO %s (source, book_name, author, update_time, latest_chapter, latest_chapter_url, \
+            cmd = '''INSERT INTO %s (book_name, source, author, update_time, latest_chapter, latest_chapter_url, \
                 chapter_db_name) VALUES ("%s", "%s", "%s", "%s", "%s", "%s", "%s")''' % \
-                (self.book_tb, item['source'], item['book_name'], item['author'], item['update_time'],
+                (self.book_tb, item['book_name'], item['source'], item['author'], item['update_time'],
                  item['latest_chapter'], item['latest_chapter_url'], item['chapter_db_name'])
             tx.execute(cmd)
         else:
@@ -84,88 +93,88 @@ class MySqlPipeLine(object):
 
             if result['update_time'] != item['update_time'] or result['latest_chapter'] != item['latest_chapter'] or \
                     result['latest_chapter_url'] != item['latest_chapter_url']:
-                spider.logger.info('Update books[%s, %s, %s, %s, %s, %s, %s]' %
-                                    (item['source'], item['book_name'], item['author'], item['update_time'],
-                                        item['latest_chapter'], item['latest_chapter_url'], item['chapter_db_name']))
+                self.logger.info('Update books[%s, %s, %s, %s, %s, %s, %s]' %
+                                 (item['book_name'], item['source'], item['author'], item['update_time'],
+                                  item['latest_chapter'], item['latest_chapter_url'], item['chapter_db_name']))
 
                 cmd = '''UPDATE %s SET update_time="%s", latest_chapter="%s", latest_chapter_url="%s", \
-                    chapter_db_name="%s" WHERE source="%s" AND book_name="%s"''' % \
+                    chapter_db_name="%s", source="%s" WHERE book_name="%s"''' % \
                     (self.book_tb, item['update_time'], item['latest_chapter'], item['latest_chapter_url'],
                      item['chapter_db_name'], item['source'], item['book_name'])
                 tx.execute(cmd)
 
                 # 将新的章节信息添加到last_chapter_info中
                 chapter = dict()
-                chapter['source'] = item['source']
                 chapter['book_name'] = item['book_name']
                 chapter['latest_chapter_url'] = item['latest_chapter_url']
                 self.latest_chapter_info.append(chapter)
 
-    def _insert_chapters(self, tx, item, spider):
+    def _insert_chapters(self, tx, item):
         """
         添加chapters
         """
-        # 获取章节数据库名
-        md5_name = get_md5('%s_%s' % (item['source'], item['book_name']))
-
+        # 获取章节数据库名,如果books表中有chapter_db_name，则使用之，没有时使用book_name
+        md5_name = get_md5(item['book_name'])
         cmd = 'SELECT chapter_db_name FROM %s WHERE source="%s" AND book_name="%s"' % \
             (self.book_tb, item['source'], item['book_name'])
         ret = tx.execute(cmd)
         db_name = tx.fetchone()['chapter_db_name'] if ret == 1 else md5_name
-        spider.logger.debug('book_name=%s db_name=%s' % (item['book_name'], db_name))
-        self._check_chapter_tb(tx, db_name, spider)
+
+        # 检查db_name表是否存在
+        self._check_chapter_tb(tx, db_name)
 
         # 判断数据库中是否存在数据
-        cmd = 'SELECT * FROM %s WHERE source="%s" AND chapter="%s"' % (db_name, item['source'], item['chapter'])
+        cmd = 'SELECT * FROM %s WHERE chapter="%s"' % (db_name, item['chapter'])
         ret = tx.execute(cmd)
 
         if ret == 0:
             # 原来无数据时，添加新数据
-            spider.logger.info('Insert chapter[%s, %s, %s, %s, %s, %s]' % (
-                item['source'], item['book_name'], item['chapter'], item['title'], item['url'], item['content_path']))
+            self.logger.info('Insert chapter[%s, %s, %s, %s, %s, %s]' % (
+                item['book_name'], item['source'], item['chapter'], item['title'], item['url'], item['content_path']))
 
-            cmd = '''INSERT INTO %s (source, book_name, chapter, title, url, content_path) VALUES \
+            cmd = '''INSERT INTO %s (book_name, chapter, source, title, url, content_path) VALUES \
                 ("%s", "%s", "%s", "%s", "%s", "%s")''' % \
-                (db_name, item['source'], item['book_name'], item['chapter'], item['title'], item['url'],
+                (db_name, item['book_name'], item['chapter'], item['source'], item['title'], item['url'],
                     item['content_path'])
             tx.execute(cmd)
 
             # 发送邮件
+            self.logger.info('latest_chapter_info=%s' % json.dumps(self.latest_chapter_info))
             for chapter in self.latest_chapter_info:
-                spider.logger.info('Send E-Mail chapter=%s item=%s' % (str(chapter), str(
-                    {'source': item['source'], 'book_name': item['book_name'], 'latest_chapter_url': item['url']})))
-                if chapter['source'] == item['source'] and chapter['book_name'] == item['book_name'] and \
-                        chapter['latest_chapter_url'] == item['url']:
+                if chapter['book_name'] == item['book_name'] and chapter['latest_chapter_url'] == item['url']:
                     with open(item['content_path'], 'rb') as _f:
                         body = _f.read()
-                    subject = '%s_%s_%s_%s' % (item['source'], item['book_name'], item['chapter'], item['title'])
+                    subject = '%s_%s_%s' % (item['book_name'], item['chapter'], item['title'])
                     qq_email = QQ_SMTP()
                     qq_email.send(subject=subject, body=body)
                     self.latest_chapter_info.remove(chapter)
+                    self.logger.info('Send E-Mail chapter=%s item=%s' % (str(chapter), str(
+                        {'source': item['source'], 'book_name': item['book_name'], 'latest_chapter_url': item['url']})))
 
-    def _handle_error(self, failue, item, spider):
+    def _handle_error(self, failue, item):
         if isinstance(item, BookInfo):
-            spider.logger.error('[MySqlPipeLine] Error while dealing with books[%s, %s, %s, %s, %s, %s, %s].' %
-                                (item['source'], item['book_name'], item['author'], item['update_time'],
-                                    item['latest_chapter'], item['latest_chapter_url'], item['chapter_db_name']))
+            self.logger.error('[MySqlPipeLine] Error while dealing with books[%s, %s, %s, %s, %s, %s, %s].' %
+                              (item['book_name'], item['source'],  item['author'], item['update_time'],
+                               item['latest_chapter'], item['latest_chapter_url'], item['chapter_db_name']))
         elif isinstance(item, ChapterInfo):
-            spider.logger.error('[MySqlPipeLine] Error while dealing with chapter[%s, %s, %s, %s, %s, %s]' %
-                                (item['source'], item['book_name'], item['chapter'], item['title'], item['url'],
-                                    item['content_path']))
+            self.logger.error('[MySqlPipeLine] Error while dealing with chapter[%s, %s, %s, %s, %s, %s]' %
+                              (item['book_name'], item['source'], item['chapter'], item['title'], item['url'],
+                               item['content_path']))
         raise DropItem(failue.printDetailedTraceback())
 
-    def _check_chapter_tb(self, tx, db_name, spider):
+    def _check_chapter_tb(self, tx, db_name):
         """
-        判断数据库中，表是否存在
+        判断数据库中，章节信息的表是否存在
         """
-        cmd = 'SELECT * FROM information_schema.INNODB_SYS_TABLES WHERE name="%s/%s"' % (settings.MYSQL_DBNAME, db_name)
+        cmd = 'SELECT * FROM information_schema.INNODB_SYS_TABLES WHERE name="%s/%s"' % (
+            settings.MYSQL_DBNAME, db_name)
         ret = tx.execute(cmd)
         if ret == 0:
-            spider.logger.warning('Don\'t exist table[%s]. Create it!' % db_name)
+            self.logger.warning('Don\'t exist table[%s]. Create it!' % db_name)
             cmd = '''CREATE TABLE IF NOT EXISTS %s
-                (source VARCHAR(100), \
-                book_name VARCHAR(100), \
+                (book_name VARCHAR(100), \
                 chapter VARCHAR(100), \
+                source VARCHAR(100), \
                 title VARCHAR(100), \
                 url VARCHAR(100), \
                 content_path VARCHAR(500)) CHARSET="utf8"''' % db_name
@@ -181,8 +190,8 @@ class MySqlPipeLine(object):
         if ret == 0:
             cmd = '''CREATE TABLE IF NOT EXISTS %s \
                 (id int(11) NOT NULL AUTO_INCREMENT PRIMARY KEY, \
-                source VARCHAR(100) NOT NULL,\
                 book_name VARCHAR(100) NOT NULL,\
+                source VARCHAR(100) NOT NULL,\
                 author VARCHAR(100) NOT NULL, \
                 update_time VARCHAR(100) NOT NULL, \
                 latest_chapter VARCHAR(100) NOT NULL, \
@@ -231,19 +240,19 @@ class MySqldbPipeLine(object):
                 self._insert_books(item, spider)
             except:
                 self.conn.rollback()
-                spider.logger.error('[MySqldbPipeLine] Error while dealing with books[%s, %s, %s, %s, %s, %s, %s].' %
-                                    (item['source'], item['book_name'], item['author'], item['update_time'],
-                                     item['latest_chapter'], item['latest_chapter_url'], item['chapter_db_name']))
-                spider.logger.error(traceback.print_exc())
+                self.logger.error('[MySqldbPipeLine] Error while dealing with books[%s, %s, %s, %s, %s, %s, %s].' %
+                                  (item['source'], item['book_name'], item['author'], item['update_time'],
+                                   item['latest_chapter'], item['latest_chapter_url'], item['chapter_db_name']))
+                self.logger.error(traceback.print_exc())
         elif isinstance(item, ChapterInfo):
             try:
                 self._insert_chapter(item, spider)
             except:
                 self.conn.rollback()
-                spider.logger.error('[MySqldbPipeLine] Error while dealing with chapter[%s, %s, %s, %s, %s, %s]' %
-                                    (item['source'], item['book_name'], item['chapter'], item['title'], item['url'],
-                                     item['content_path']))
-                spider.logger.error(traceback.print_exc())
+                self.logger.error('[MySqldbPipeLine] Error while dealing with chapter[%s, %s, %s, %s, %s, %s]' %
+                                  (item['source'], item['book_name'], item['chapter'], item['title'], item['url'],
+                                   item['content_path']))
+                self.logger.error(traceback.print_exc())
         return item
 
     def _insert_books(self, item, spider):
@@ -282,10 +291,13 @@ class MySqldbPipeLine(object):
         """
         # 获取章节数据库名
         md5_name = get_md5('%s_%s' % (item['source'], item['book_name']))
+        md5_name = md5_name[:16]
+
         cmd = 'SELECT chapter_db_name FROM %s WHERE source="%s" AND book_name="%s"' % \
             (self.book_tb, item['source'], item['book_name'])
         ret = self.cursor.execute(cmd)
         db_name = self.cursor.fetchone()['chapter_db_name'] if ret == 1 else md5_name
+        print db_name
         self._check_chapter_tb(db_name)
 
         # 判断数据库中是否存在数据
@@ -327,7 +339,7 @@ class MySqldbPipeLine(object):
                 ENGINE=InnoDB DEFAULT CHARSET="utf8"'''  % self.book_tb
             self.cursor.execute(cmd)
 
-    def _check_chapter_tb(self, db_name, spider):
+    def _check_chapter_tb(self, db_name):
         """
         判断数据库中，表是否存在
         """
@@ -337,7 +349,6 @@ class MySqldbPipeLine(object):
         if ret == 0:
             cmd = '''CREATE TABLE IF NOT EXISTS %s \
                 (source VARCHAR(100), \
-                book_name VARCHAR(100), \
                 chapter VARCHAR(100), \
                 title VARCHAR(100), \
                 url VARCHAR(100), \

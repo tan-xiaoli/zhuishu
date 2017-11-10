@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+#!/usr/bin/python
+# coding=utf-8
+
+import sys
+reload(sys)
+sys.setdefaultencoding('UTF-8')
 
 import json
 import codecs
@@ -13,6 +18,9 @@ class JsonWithEncodingWriterPipeLine(object):
 
     def __init__(self, json_file):
         self.file = codecs.open(json_file, 'wb', encoding='utf-8')
+
+    def __del__(self):
+        self.file.close()
 
     @classmethod
     def from_settings(cls, settings):
